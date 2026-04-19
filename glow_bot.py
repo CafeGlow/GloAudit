@@ -1,4 +1,5 @@
 import os
+from database import init_db, save_audit, get_user_history
 import cv2
 import json
 import base64
@@ -133,15 +134,12 @@ def generate_trend_summary(history, current_metrics):
 # 3. TELEGRAM HANDLERS
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['images'] = []
-    context.user_data['history'] = context.user_data.get('history', [])
     await update.message.reply_text("✨ Welcome to Cafe Glow! ✨\n\nSend me your FIRST photo (The Baseline).")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # SAFETY: Ensure state exists even if user skipped /start
     if 'images' not in context.user_data:
         context.user_data['images'] = []
-    if 'history' not in context.user_data:
-        context.user_data['history'] = []
         
     photo_file = await update.message.photo[-1].get_file()
     user_dir = f"vault/{update.effective_user.id}"
@@ -173,9 +171,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         img1, img2 = context.user_data['images']
         
         # Prepare history context for trend-aware prompting
+        db_history = get_user_history(update.effective_user.id, limit=3)
         history_context = ""
-        if context.user_data.get('history'):
-            history_context = f"\nUser History (Last {min(len(context.user_data['history']), 3)} audits): {json.dumps(context.user_data['history'][-3:], indent=2)}"
+        if db_history:
+            history_context = f"\nUser History (Last {len(db_history)} audits): {json.dumps(db_history, indent=2)}"
             
         try:
             raw_result = await compare_skin(img1, img2, history_context)
@@ -192,8 +191,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Safely extract metrics using .get()
             metrics = content.get('cosmetic_metrics', {})
             
-            # FEATURE: Trend Summary Generation
-            trend_msg = generate_trend_summary(context.user_data['history'], metrics)
+            # Fetch history from DB for the trend summary (BEFORE saving current)
+            db_history = get_user_history(update.effective_user.id)
+            trend_msg = generate_trend_summary(db_history, metrics)
+
+            # NEW: Save current audit to permanent database
+            save_audit(update.effective_user.id, metrics, content.get('witty_report'))
             
             report = (
                 f"--- ☕ CAFE GLOW AUDIT ---\n\n"
@@ -212,12 +215,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             await update.message.reply_text(report)
             
-            # Save to history & keep only last 5 audits to save memory
-            context.user_data['history'].append({
-                'date': datetime.datetime.now().isoformat(),
-                'metrics': metrics
-            })
-            context.user_data['history'] = context.user_data['history'][-5:]
+
             
         except Exception as e:
             # Explicit logging so we see EXACTLY why it failed in the terminal
@@ -236,6 +234,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 4. START THE BOT
 if __name__ == '__main__':
+    # Initialize DB
+    init_db()
+
     application = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
