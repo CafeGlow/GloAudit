@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 *.jpg
 *.jpeg
+glow_data.db
+vault/
